@@ -54,6 +54,7 @@ def make_chatgroq_model():
         groq_api_key=GROQ_API_KEY
     )
 
+
 # ------------------------------------------------------------
 # Process uploaded PDF -> FAISS Vectorstore
 # ------------------------------------------------------------
@@ -76,7 +77,7 @@ def process_document(file):
         texts = text_splitter.split_documents(documents)
         print(f"🔍 Split into {len(texts)} chunks.")
 
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
         print("⚙️ Generating embeddings...")
 
         # Create FAISS vectorstore
@@ -110,7 +111,7 @@ def query_document(question: str):
 
     if qa_chain is None:
         try:
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
             vectorstore = FAISS.load_local(VECTORSTORE_PATH, embeddings, allow_dangerous_deserialization=True)
             llm = make_chatgroq_model()
             qa_chain = RetrievalQA.from_chain_type(
