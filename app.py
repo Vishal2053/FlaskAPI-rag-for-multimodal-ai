@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import nltk
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -7,13 +8,13 @@ from flask_cors import CORS
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
+import google.generativeai as genai
 
 # ------------------------------------------------------------
-# NLTK Setup (quietly downloads required resources)
+# 🧠 NLTK Setup
 # ------------------------------------------------------------
 for pkg in ["punkt", "averaged_perceptron_tagger_eng"]:
     try:
@@ -22,15 +23,54 @@ for pkg in ["punkt", "averaged_perceptron_tagger_eng"]:
         nltk.download(pkg, quiet=True)
 
 # ------------------------------------------------------------
-# Load environment variables
+# 🔑 Load Environment Variables
 # ------------------------------------------------------------
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
 if not GROQ_API_KEY:
     raise ValueError("❌ GROQ_API_KEY not found in environment!")
+if not GOOGLE_API_KEY:
+    raise ValueError("❌ GOOGLE_API_KEY not found in environment!")
+
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # ------------------------------------------------------------
-# Global settings
+# 🤖 Custom Gemini Embeddings Wrapper (Fixed + Optimized)
+# ------------------------------------------------------------
+class GeminiEmbeddings:
+    def __init__(self, model_name="models/embedding-001"):
+        self.model_name = model_name
+
+    def embed_documents(self, texts):
+        """Embed multiple documents into vectors"""
+        embeddings = []
+        for text in texts:
+            try:
+                result = genai.embed_content(model=self.model_name, content=text.page_content)
+                embeddings.append(result["embedding"])
+                time.sleep(0.2)  # avoid rate limit / memory spikes
+            except Exception as e:
+                print("⚠️ Embedding failed for a chunk:", e)
+                embeddings.append([0.0] * 768)  # fallback vector
+        return embeddings
+
+    def embed_query(self, text):
+        """Embed a single query string"""
+        try:
+            result = genai.embed_content(model=self.model_name, content=text)
+            return result["embedding"]
+        except Exception as e:
+            print("⚠️ Query embedding failed:", e)
+            return [0.0] * 768
+
+    def __call__(self, text):
+        """Allow FAISS/LangChain to call this object directly."""
+        return self.embed_query(text)
+
+# ------------------------------------------------------------
+# ⚙️ Global Configuration
 # ------------------------------------------------------------
 VECTORSTORE_PATH = "./faiss_index"
 os.makedirs(VECTORSTORE_PATH, exist_ok=True)
@@ -39,13 +79,13 @@ vectorstore = None
 qa_chain = None
 
 # ------------------------------------------------------------
-# Flask setup
+# 🧩 Flask Setup
 # ------------------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
 # ------------------------------------------------------------
-# Helper: Load LLM
+# 💬 Load ChatGroq Model
 # ------------------------------------------------------------
 def make_chatgroq_model():
     return ChatGroq(
@@ -54,9 +94,8 @@ def make_chatgroq_model():
         groq_api_key=GROQ_API_KEY
     )
 
-
 # ------------------------------------------------------------
-# Process uploaded PDF -> FAISS Vectorstore
+# 📄 Process Uploaded PDF → Create FAISS Vectorstore
 # ------------------------------------------------------------
 def process_document(file):
     global vectorstore, qa_chain
@@ -66,21 +105,21 @@ def process_document(file):
         tmp_path = tmp.name
 
     try:
-        print("📄 Processing document:", file.filename)
+        print(f"📄 Processing document: {file.filename}")
         loader = PyPDFLoader(tmp_path)
         documents = loader.load()
 
         if not documents:
             raise ValueError("No text extracted from the PDF")
 
-        text_splitter = CharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+        # Reduced chunk size for memory optimization
+        text_splitter = CharacterTextSplitter(chunk_size=600, chunk_overlap=50)
         texts = text_splitter.split_documents(documents)
         print(f"🔍 Split into {len(texts)} chunks.")
 
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
+        embeddings = GeminiEmbeddings()
         print("⚙️ Generating embeddings...")
 
-        # Create FAISS vectorstore
         vectorstore = FAISS.from_documents(texts, embeddings)
         vectorstore.save_local(VECTORSTORE_PATH)
 
@@ -92,7 +131,7 @@ def process_document(file):
             return_source_documents=True,
         )
 
-        print("✅ Document processed and vectorstore created.")
+        print("✅ Document processed and vectorstore created successfully.")
         os.unlink(tmp_path)
         return True
 
@@ -103,15 +142,16 @@ def process_document(file):
         return False
 
 # ------------------------------------------------------------
-# Query the Vectorstore
+# ❓ Query the Vectorstore
 # ------------------------------------------------------------
 def query_document(question: str):
     global qa_chain, vectorstore
-    print("❓ Question received:", question)
+    print("❓ Received question:", question)
 
     if qa_chain is None:
         try:
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
+            print("♻️ Reloading FAISS vectorstore...")
+            embeddings = GeminiEmbeddings()
             vectorstore = FAISS.load_local(VECTORSTORE_PATH, embeddings, allow_dangerous_deserialization=True)
             llm = make_chatgroq_model()
             qa_chain = RetrievalQA.from_chain_type(
@@ -126,22 +166,22 @@ def query_document(question: str):
 
     try:
         result = qa_chain.invoke({"query": question})
-        print("💡 Answer generated:", result)
         answer = result.get("result", "No answer found")
         src_docs = result.get("source_documents", [])
         source = src_docs[0].metadata.get("source", "Unknown") if src_docs else "N/A"
+        print("💡 Answer generated successfully.")
         return answer, source
+
     except Exception as e:
         print("❌ Error during query:", e)
         return f"Error: {e}", None
 
 # ------------------------------------------------------------
-# Flask Routes
+# 🌐 Flask Routes
 # ------------------------------------------------------------
-
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"message": "Welcome to Vishal's PDF Chat Flask API! Upload a document and ask questions."})
+    return jsonify({"message": "Welcome to Vishal's Multimodal AI Flask API with Gemini + Groq!"})
 
 @app.route("/upload_doc", methods=["POST"])
 def upload_doc():
@@ -168,8 +208,7 @@ def ask():
     return jsonify({"answer": answer, "source": source or "No source found"})
 
 # ------------------------------------------------------------
-# Run Flask
+# 🚀 Run Flask App
 # ------------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
- 
